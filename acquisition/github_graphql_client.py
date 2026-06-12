@@ -12,9 +12,15 @@ import logging
 import requests
 
 from .graphql_queries import GET_README_QUERY, GET_REPOSITORY_QUERY, build_batch_metadata_query
-from .github_client import GitHubClientError, GitHubRateLimit
 
 logger = logging.getLogger(__name__)
+
+
+class GitHubGraphQLClientError(RuntimeError):
+    """Raised when the GitHub GraphQL API returns an unrecoverable error."""
+
+# Backwards-compatible alias so existing callers don't break
+GitHubClientError = GitHubGraphQLClientError
 
 
 class GitHubGraphQLClient:

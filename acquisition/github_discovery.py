@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .github_client import GitHubClient
+from .github_graphql_client import GitHubGraphQLClient
+from .graphql_queries import SEARCH_REPOSITORIES_QUERY
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,36 @@ class DiscoveryConfig:
 
 
 class GitHubDiscoveryEngine:
-    """Discovers repositories across categories and maturity bands."""
+    """Discovers repositories across categories and maturity bands using GraphQL only."""
 
-    def __init__(self, client: GitHubClient, *, config: DiscoveryConfig | None = None) -> None:
+    def __init__(self, client: GitHubGraphQLClient, *, config: DiscoveryConfig | None = None) -> None:
         self.client = client
         self.config = config or DiscoveryConfig()
         self.random = random.Random(self.config.random_seed)
+
+    def _search_graphql(self, query_str: str, per_page: int) -> list[dict[str, Any]]:
+        """Run a GraphQL repository search and return a flat list of repo dicts."""
+        result = self.client.execute(
+            SEARCH_REPOSITORIES_QUERY,
+            {"query": query_str},
+        )
+        if not result:
+            return []
+        nodes = result.get("data", {}).get("search", {}).get("nodes", [])
+        repos = []
+        for node in nodes[:per_page]:
+            full_name = node.get("nameWithOwner")
+            if not full_name:
+                continue
+            repos.append({
+                "full_name": full_name,
+                "name": node.get("name"),
+                "stargazers_count": node.get("stargazerCount", 0),
+                "description": node.get("description"),
+                "pushed_at": node.get("pushedAt"),
+                "owner": {"login": (node.get("owner") or {}).get("login")},
+            })
+        return repos
 
     def discover(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         target = limit or self.config.total_limit
@@ -73,17 +98,11 @@ class GitHubDiscoveryEngine:
                 if len(discovered) >= target:
                     break
                 query = self._query_for_band(category, terms, band)
-                sort = "updated" if band == "recently_active" else "stars"
+                per_page = min(self.config.per_query, max(per_category * 2, 10))
                 try:
-                    repos = self.client.search_repositories(
-                        query,
-                        sort=sort,
-                        order="desc",
-                        per_page=min(self.config.per_query, max(per_category * 2, 10)),
-                        max_pages=self.config.pages_per_query,
-                    )
+                    repos = self._search_graphql(query, per_page)
                 except Exception as exc:
-                    print(f"[WARN] Discovery query failed for {category}/{band}: {exc}")
+                    logger.warning(f"Discovery query failed for {category}/{band}: {exc}")
                     continue
                 for repo in repos:
                     full_name = repo.get("full_name")
