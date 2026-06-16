@@ -37,13 +37,23 @@ _CATEGORIES = {
 def classify_category(repo: dict, tags: list[str]) -> str:
     """Executes taxonomy alignment to categorize the payload target."""
     paragraphs = repo.get("extracted_paragraphs", [])
-    raw_desc = " ".join(paragraphs).lower()
+    desc_text = " ".join(paragraphs)
     
     # Pre-process raw description to disambiguate specific terms
     # Prevent "ReAct" (Reasoning and Acting) from being categorized as React (Frontend UI)
-    raw_desc = re.sub(r'\breact\b(?!\s+(?:ui|native|component|frontend|library))', 'reasoning_and_acting', raw_desc, flags=re.IGNORECASE)
+    # We match "ReAct" case-sensitively to distinguish it from React/react
+    desc_text = re.sub(r'\bReAct\b', 'reasoning_and_acting', desc_text)
+    raw_desc = desc_text.lower()
     
-    tag_set = set(t.lower() for t in tags)
+    # Also handle tags case-sensitively
+    processed_tags = []
+    for t in tags:
+        if t == "ReAct":
+            processed_tags.append("reasoning_and_acting")
+        else:
+            processed_tags.append(t)
+            
+    tag_set = set(t.lower() for t in processed_tags)
     scores = {cat: 0 for cat in _CATEGORIES}
     
     for cat, keywords in _CATEGORIES.items():
@@ -57,3 +67,4 @@ def classify_category(repo: dict, tags: list[str]) -> str:
         return "General / Other"
         
     return max(scores, key=scores.get)
+
