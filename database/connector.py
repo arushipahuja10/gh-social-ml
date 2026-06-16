@@ -17,7 +17,11 @@ import re
 from urllib.parse import urlparse, parse_qs
 from typing import Any
 
-import pg8000.dbapi
+try:
+    import pg8000.dbapi
+    HAS_PG8000 = True
+except ImportError:
+    HAS_PG8000 = False
 
 logger = logging.getLogger("pipeline.database")
 
@@ -37,13 +41,21 @@ class PostgreSQLConnector:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or os.getenv("DATABASE_URL")
         self.enabled = bool(self.database_url)
-        self._conn: pg8000.dbapi.Connection | None = None
+        self._conn: Any = None
 
         if not self.enabled:
             logger.warning(
                 "DATABASE_URL is not set. Database integration will be disabled. "
                 "Set it in your .env file — e.g. postgresql://user@localhost:5432/gh_social"
             )
+            return
+
+        if not HAS_PG8000:
+            logger.warning(
+                "DATABASE_URL is set but pg8000 is not installed. Database integration will be disabled. "
+                "Run 'pip install pg8000' to enable database storage."
+            )
+            self.enabled = False
             return
 
         try:
@@ -54,6 +66,12 @@ class PostgreSQLConnector:
             self.enabled = False
 
     # ── URL Parsing ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_sslmode(url: str) -> str | None:
+        """Get the sslmode query parameter from the URL."""
+        qs = parse_qs(urlparse(url).query)
+        return qs.get("sslmode", [None])[0]
 
     def _parse_url(self, url: str) -> dict[str, Any]:
         """Parse PostgreSQL connection URL into pg8000 parameters.
@@ -82,12 +100,22 @@ class PostgreSQLConnector:
         if password:
             params["password"] = password
 
-        # Auto-enable SSL for Supabase / remote hosts
-        if self._detect_supabase(url) or self._has_ssl_query_param(url):
+        sslmode = self._get_sslmode(url)
+        is_supabase = self._detect_supabase(url)
+
+        # Configure SSL context if remote/Supabase or explicit sslmode is requested
+        if is_supabase or sslmode in ("require", "verify-ca", "verify-full"):
             ssl_context = ssl.create_default_context()
-            # Supabase uses pooler certs that may not match hostname exactly
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            if sslmode in ("verify-ca", "verify-full"):
+                ssl_context.check_hostname = (sslmode == "verify-full")
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+            else:
+                # 'require' or default Supabase behavior:
+                # Relax checks for hostname and certificate to allow connecting to poolers/proxies
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
             params["ssl_context"] = ssl_context
 
         return params
@@ -97,13 +125,6 @@ class PostgreSQLConnector:
         """Return True if the URL points to a Supabase-hosted database."""
         hostname = urlparse(url).hostname or ""
         return bool(_SUPABASE_HOST_RE.search(hostname))
-
-    @staticmethod
-    def _has_ssl_query_param(url: str) -> bool:
-        """Check if sslmode=require or similar is in the URL query string."""
-        qs = parse_qs(urlparse(url).query)
-        sslmode = qs.get("sslmode", [None])[0]
-        return sslmode in ("require", "verify-ca", "verify-full")
 
     # ── Connection Management ─────────────────────────────────────────────────
 
@@ -215,8 +236,17 @@ class PostgreSQLConnector:
             # Add columns that may be missing from older schema versions
             # (safe — ALTER TABLE ADD IF NOT EXISTS avoids errors on columns that already exist)
             _migration_columns = [
-                ("star_count", "INT DEFAULT 0"),
+                ("owner_id", "VARCHAR(100)"),
+                ("repo_name", "VARCHAR(200)"),
+                ("full_name", "VARCHAR(255)"),
+                ("description", "TEXT"),
                 ("primary_language", "VARCHAR(50)"),
+                ("language_used", "JSONB DEFAULT '[]'::jsonb"),
+                ("topics", "JSONB DEFAULT '[]'::jsonb"),
+                ("readme_summary", "TEXT"),
+                ("star_count", "INT DEFAULT 0"),
+                ("forks_count", "INT DEFAULT 0"),
+                ("pr_count", "INT DEFAULT 0"),
             ]
             for col_name, col_def in _migration_columns:
                 try:
@@ -225,6 +255,14 @@ class PostgreSQLConnector:
                     )
                 except Exception:
                     conn.rollback()
+
+            # Ensure github_repo_url limit is increased if existing table has VARCHAR(200)
+            try:
+                cursor.execute(
+                    "ALTER TABLE Repo ALTER COLUMN github_repo_url TYPE VARCHAR(500);"
+                )
+            except Exception:
+                conn.rollback()
 
             conn.commit()
             logger.info("Database schemas verified successfully.")
@@ -325,13 +363,16 @@ class PostgreSQLConnector:
                 )
 
                 try:
+                    cursor.execute("SAVEPOINT row_upsert;")
                     cursor.execute(upsert_query, params)
+                    cursor.execute("RELEASE SAVEPOINT row_upsert;")
                     upserted_count += 1
                 except Exception as row_exc:
                     logger.error(f"Failed to upsert repo {full_name}: {row_exc}")
-                    conn.rollback()
-                    # Re-open a new cursor after rollback so remaining rows can proceed
-                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("ROLLBACK TO SAVEPOINT row_upsert;")
+                    except Exception as rb_exc:
+                        logger.error(f"Failed to rollback to savepoint: {rb_exc}")
 
             conn.commit()
             logger.info(
