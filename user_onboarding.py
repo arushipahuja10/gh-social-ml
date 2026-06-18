@@ -253,6 +253,7 @@ class UserOnboardingPipeline:
         Raises:
             ImportError: If qdrant-client is not installed.
             ValueError: If user_id or vector validation fails.
+            Exception: If Qdrant operation fails (propagated for caller handling).
         """
         if not HAS_QDRANT:
             raise ImportError(
@@ -267,6 +268,14 @@ class UserOnboardingPipeline:
         # Validate vector
         if not isinstance(vector, list) or len(vector) == 0:
             raise ValueError("vector must be a non-empty list.")
+
+        # Validate vector dimension matches expected dimension
+        if len(vector) != VECTOR_DIMENSION:
+            raise ValueError(
+                f"Vector dimension {len(vector)} does not match "
+                f"expected VECTOR_DIMENSION {VECTOR_DIMENSION}. "
+                "This indicates a model mismatch or configuration error."
+            )
 
         # Validate vector elements are numbers and not NaN/Inf
         for i, val in enumerate(vector):
@@ -286,11 +295,11 @@ class UserOnboardingPipeline:
             )
             return False
 
-        # Ensure payload contains user_id (copy to avoid mutating caller's object)
+        # Ensure payload contains user_id (deep copy to avoid mutating caller's nested objects)
         if payload is None:
             payload = {}
         else:
-            payload = copy.copy(payload)
+            payload = copy.deepcopy(payload)
         payload["user_id"] = user_id
 
         try:
@@ -340,7 +349,8 @@ class UserOnboardingPipeline:
 
         except Exception as exc:
             logger.error(f"Failed to save vector to Qdrant: {exc}")
-            return False
+            # Re-raise to allow caller to handle specific errors
+            raise
 
     def onboard_user(
         self,
@@ -444,7 +454,9 @@ def save_user_vector_to_qdrant(
         True if the vector was successfully saved, False otherwise.
 
     Raises:
+        ImportError: If qdrant-client is not installed.
         ValueError: If user_id or vector validation fails.
+        Exception: If Qdrant operation fails (propagated for caller handling).
     """
     # Validate inputs before creating pipeline to avoid unnecessary model loading
     if not user_id or not isinstance(user_id, str):
@@ -481,14 +493,28 @@ def onboard_user(
 
     Returns:
         True if onboarding succeeded, False otherwise.
+
+    Raises:
+        ValueError: If user_id or user_data validation fails.
+        ImportError: If required dependencies are not installed.
     """
-    pipeline = UserOnboardingPipeline()
-    return pipeline.onboard_user(
-        user_id=user_id,
-        user_data=user_data,
-        qdrant_url=qdrant_url,
-        qdrant_api_key=qdrant_api_key,
-    )
+    # Validate inputs before creating pipeline to avoid unnecessary model loading
+    if not user_id or not isinstance(user_id, str):
+        raise ValueError("user_id must be a non-empty string.")
+    if not isinstance(user_data, dict):
+        raise ValueError("user_data must be a dictionary.")
+    
+    try:
+        pipeline = UserOnboardingPipeline()
+        return pipeline.onboard_user(
+            user_id=user_id,
+            user_data=user_data,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+        )
+    except Exception as exc:
+        logger.error(f"User onboarding failed for '{user_id}': {exc}")
+        return False
 
 
 # ── Example Usage ───────────────────────────────────────────────────────────────
