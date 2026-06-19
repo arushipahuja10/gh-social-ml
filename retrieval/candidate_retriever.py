@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import math
+import uuid
 from typing import Any, Optional
 
 from .config import (
@@ -38,8 +39,7 @@ from .config import (
 )
 
 try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import SearchParams, Filter, FieldCondition, MatchValue
+    from ingestion.qdrant_store import QdrantRepositoryStore
     HAS_QDRANT = True
 except ImportError:
     HAS_QDRANT = False
@@ -72,18 +72,20 @@ class CandidateRetriever:
         self.db = db_connector
 
         # ── Qdrant client setup ──────────────────────────────────────────
-        self._qdrant: QdrantClient | None = None
+        self._qdrant_store: QdrantRepositoryStore | None = None
         if HAS_QDRANT:
             url = qdrant_url or os.getenv("QDRANT_URL", "http://localhost:6333")
             api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
             try:
-                self._qdrant = QdrantClient(
+                self._qdrant_store = QdrantRepositoryStore(
                     url=url,
                     api_key=api_key,
-                    timeout=QDRANT_TIMEOUT_SECONDS,
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    vector_name=QDRANT_VECTOR_NAME,
+                    vector_size=EMBEDDING_DIM,
                 )
                 # Quick health-check: verify the collection exists
-                info = self._qdrant.get_collection(QDRANT_COLLECTION_NAME)
+                info = self._qdrant_store.client.get_collection(QDRANT_COLLECTION_NAME)
                 logger.info(
                     "Qdrant connected — collection '%s' has %d vectors",
                     QDRANT_COLLECTION_NAME,
@@ -91,7 +93,7 @@ class CandidateRetriever:
                 )
             except Exception as exc:
                 logger.warning("Qdrant connection failed: %s. Semantic channel disabled.", exc)
-                self._qdrant = None
+                self._qdrant_store = None
         else:
             logger.warning(
                 "qdrant-client is not installed. Semantic retrieval will be disabled. "
@@ -163,7 +165,7 @@ class CandidateRetriever:
 
         # ── Merge & deduplicate ──────────────────────────────────────────
         merged_ids = self._merge_and_deduplicate(
-            semantic_ids, trending_ids, TOTAL_CANDIDATE_POOL,
+            semantic_ids, trending_ids, semantic_quota, TOTAL_CANDIDATE_POOL,
         )
 
         if not merged_ids:
@@ -196,30 +198,26 @@ class CandidateRetriever:
         if user_embedding is None or quota <= 0:
             return []
 
-        if self._qdrant is None:
-            logger.warning("Qdrant client unavailable. Semantic channel returns empty.")
+        if self._qdrant_store is None:
+            logger.warning("Qdrant store unavailable. Semantic channel returns empty.")
             return []
 
         # Over-fetch to absorb deduplication losses (single query, no loop)
         fetch_limit = min(int(math.ceil(quota * OVERFETCH_MULTIPLIER)), quota + 100)
 
         try:
-            hits = self._qdrant.search(
-                collection_name=QDRANT_COLLECTION_NAME,
-                query_vector=user_embedding,
-                search_params=SearchParams(exact=True),
+            matches = self._qdrant_store.search(
+                vector=user_embedding,
                 limit=fetch_limit,
-                with_payload=["repo_id"],  # Lightweight — only fetch the ID field
+                exact=True,
             )
             results = []
-            for hit in hits:
-                repo_id = None
-                if hit.payload:
-                    repo_id = hit.payload.get("repo_id")
+            for match in matches:
                 results.append({
-                    "point_id": str(hit.id),
-                    "repo_id": repo_id,
-                    "score": hit.score,
+                    "point_id": match["id"],
+                    "repo_id": match["repo_id"],
+                    "full_name": match["repo_id"],
+                    "score": match["score"],
                     "source": "semantic",
                 })
             logger.info("Semantic channel retrieved %d candidates from Qdrant.", len(results))
@@ -234,11 +232,11 @@ class CandidateRetriever:
     # ══════════════════════════════════════════════════════════════════════
 
     def _retrieve_trending(self, quota: int) -> list[dict[str, Any]]:
-        """Query PostgreSQL for trending repositories ordered by star count.
+        """Query PostgreSQL for trending repositories using a blended engagement score.
 
-        Uses ``star_count DESC`` as the trending proxy.  When a dedicated
-        ``trend_velocity`` column is added to the Repo table, this query
-        should be updated to ``ORDER BY trend_velocity DESC``.
+        Formula: star_count + (forks_count * 5) + (pr_count * 10)
+        This captures actual user engagement (forking and contributing)
+        rather than just raw star count.
         """
         if quota <= 0:
             return []
@@ -258,7 +256,7 @@ class CandidateRetriever:
                 """
                 SELECT repo_id, full_name, star_count
                 FROM Repo
-                ORDER BY star_count DESC NULLS LAST
+                ORDER BY (star_count + COALESCE(forks_count, 0) * 5 + COALESCE(pr_count, 0) * 10) DESC
                 LIMIT %s;
                 """,
                 (fetch_limit,),
@@ -294,30 +292,35 @@ class CandidateRetriever:
         self,
         semantic_candidates: list[dict],
         trending_candidates: list[dict],
+        semantic_limit: int,
         pool_limit: int,
     ) -> list[dict[str, Any]]:
-        """Merge channel results, deduplicate by repo_id, and cap at pool_limit.
+        """Merge channel results, deduplicate by full_name, and cap at pool_limit.
 
         Semantic candidates are placed first (higher relevance), followed by
         trending candidates that were not already captured by semantic search.
         This is a single-pass merge — no loops or recursive re-fetching.
         """
-        seen_repo_ids: set[str] = set()
+        seen_names: set[str] = set()
         merged: list[dict[str, Any]] = []
 
-        # Pass 1: Semantic candidates (priority)
+        # Pass 1: Semantic candidates (priority, up to semantic_limit)
         for candidate in semantic_candidates:
-            rid = candidate.get("repo_id") or candidate.get("point_id")
-            if rid and rid not in seen_repo_ids:
-                seen_repo_ids.add(rid)
+            name = candidate.get("full_name") or candidate.get("repo_id")
+            if name and name not in seen_names:
+                seen_names.add(name)
                 merged.append(candidate)
+                if len(merged) >= semantic_limit:
+                    break
 
-        # Pass 2: Trending candidates (fill remaining slots)
+        # Pass 2: Trending candidates (fill remaining slots up to pool_limit)
         for candidate in trending_candidates:
-            rid = candidate.get("repo_id")
-            if rid and rid not in seen_repo_ids:
-                seen_repo_ids.add(rid)
+            name = candidate.get("full_name") or candidate.get("repo_id")
+            if name and name not in seen_names:
+                seen_names.add(name)
                 merged.append(candidate)
+                if len(merged) >= pool_limit:
+                    break
 
         # Slice to the target pool size (no loop — just a list slice)
         final = merged[:pool_limit]
@@ -343,9 +346,17 @@ class CandidateRetriever:
 
         This runs two batch queries (one to each database) to avoid N+1 problems.
         """
+        # Ensure every candidate has full_name and point_id populated
+        for c in candidates:
+            name = c.get("full_name") or c.get("repo_id")
+            if name:
+                c["full_name"] = name
+                if not c.get("point_id"):
+                    c["point_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"github:{name}"))
+
         # ── Step 1: Batch-fetch metadata from PostgreSQL ─────────────────
-        repo_ids = [c.get("repo_id") for c in candidates if c.get("repo_id")]
-        metadata_map = self._batch_fetch_metadata(repo_ids)
+        full_names = [c.get("full_name") for c in candidates if c.get("full_name")]
+        metadata_map = self._batch_fetch_metadata(full_names)
 
         # ── Step 2: Batch-fetch embeddings from Qdrant ───────────────────
         point_ids = [c.get("point_id") for c in candidates if c.get("point_id")]
@@ -354,7 +365,7 @@ class CandidateRetriever:
         # ── Step 3: Join into final payload ──────────────────────────────
         hydrated: list[dict[str, Any]] = []
         for candidate in candidates:
-            rid = candidate.get("repo_id")
+            name = candidate.get("full_name")
             pid = candidate.get("point_id")
 
             entry: dict[str, Any] = {
@@ -363,12 +374,11 @@ class CandidateRetriever:
             }
 
             # Merge PostgreSQL metadata
-            if rid and rid in metadata_map:
-                entry.update(metadata_map[rid])
-            elif rid:
-                # Repo exists in Qdrant but not in PostgreSQL — include basic info
-                entry["repo_id"] = rid
-                entry["full_name"] = candidate.get("full_name")
+            if name and name in metadata_map:
+                entry.update(metadata_map[name])
+            else:
+                # include basic info if missing from DB
+                entry["full_name"] = name
 
             # Attach embedding vector
             if pid and pid in embedding_map:
@@ -383,10 +393,10 @@ class CandidateRetriever:
 
     def _batch_fetch_metadata(
         self,
-        repo_ids: list[str],
+        full_names: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Fetch full metadata rows from PostgreSQL for a batch of repo_ids."""
-        if not repo_ids or not self.db.enabled:
+        """Fetch full metadata rows from PostgreSQL for a batch of repository full_names."""
+        if not full_names or not self.db.enabled:
             return {}
 
         conn = None
@@ -394,7 +404,7 @@ class CandidateRetriever:
             conn = self.db.connect()
             cursor = conn.cursor()
 
-            # Use ANY() for batch retrieval in a single query
+            # Query by full_name instead of repo_id
             cursor.execute(
                 """
                 SELECT repo_id, github_repo_url, owner_id, repo_name, full_name,
@@ -403,9 +413,9 @@ class CandidateRetriever:
                        likes_count, comments_count, saves_count, views_count,
                        created_at, updated_at
                 FROM Repo
-                WHERE repo_id::text = ANY(%s);
+                WHERE full_name = ANY(%s);
                 """,
-                (repo_ids,),
+                (full_names,),
             )
 
             columns = [
@@ -419,11 +429,11 @@ class CandidateRetriever:
             result_map: dict[str, dict[str, Any]] = {}
             for row in cursor.fetchall():
                 row_dict = dict(zip(columns, row))
-                result_map[str(row_dict["repo_id"])] = row_dict
+                result_map[row_dict["full_name"]] = row_dict
 
             logger.info(
-                "Metadata hydration: %d/%d repo IDs found in PostgreSQL.",
-                len(result_map), len(repo_ids),
+                "Metadata hydration: %d/%d full names found in PostgreSQL.",
+                len(result_map), len(full_names),
             )
             return result_map
 
@@ -442,12 +452,12 @@ class CandidateRetriever:
         point_ids: list[str],
     ) -> dict[str, list[float]]:
         """Fetch embedding vectors from Qdrant for a batch of point IDs."""
-        if not point_ids or self._qdrant is None:
+        if not point_ids or self._qdrant_store is None:
             return {}
 
         try:
             # Qdrant retrieve() fetches points by their IDs in a single call
-            points = self._qdrant.retrieve(
+            points = self._qdrant_store.client.retrieve(
                 collection_name=QDRANT_COLLECTION_NAME,
                 ids=point_ids,
                 with_vectors=True,
