@@ -262,7 +262,7 @@ def _parse_args() -> argparse.Namespace:
         prog="main.py",
         description="gh-social-ml acquisition pipeline: Discovery → Enrichment → Quality Filter",
     )
-    p.add_argument("--limit",            type=int, default=100,    help="Target number of repos (default: 100)")
+    p.add_argument("--limit",            type=int, default=100,    help="Maximum number of repositories to fetch in this run (default: 100)")
     p.add_argument("--batch-size",       type=int, default=10,     help="Enrichment batch size (default: 10)")
     p.add_argument("--min-readme-chars", type=int, default=200,    help="Minimum README length to keep a repo (default: 200)")
     p.add_argument("--index-qdrant",     action="store_true",      help="Deprecated: Qdrant indexing now runs by default")
@@ -316,8 +316,8 @@ if __name__ == "__main__":
     if current_count >= target_count:
         logger.info(f"Approved corpus has {current_count} repositories (>= {target_count}). Skipping new repository acquisition.")
     else:
-        fetch_limit = target_count - current_count
-        logger.info(f"Approved corpus has {current_count} repositories. Automatically fetching exactly {fetch_limit} repositories to reach the 1000 target...")
+        fetch_limit = min(target_count - current_count, args.limit)
+        logger.info(f"Approved corpus has {current_count} repositories. Fetching up to {fetch_limit} repositories to reach the {target_count} target...")
 
         # Load existing repos to filter out duplicates in run_acquisition
         existing_repos = set()
