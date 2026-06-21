@@ -223,7 +223,7 @@ class TrendingStorage:
                         pushed_at,
                         repo["primary_language"],
                         json.dumps(repo.get("topics", [])),
-                        repo.get("readme", "")[:50000],  # Cap README length
+                        repo.get("readme", "")[:config.README_MAX_LENGTH],  # Cap README length
                         repo.get("default_branch", "main"),
                         first_seen_at,
                         refresh_ts,
@@ -243,7 +243,6 @@ class TrendingStorage:
                         break
                     continue
 
-            conn.commit()
             logger.info(f"Successfully upserted {upserted_count}/{len(repositories)} repositories.")
 
             # Remove repositories that are no longer trending (not in current successful batch)
@@ -255,7 +254,6 @@ class TrendingStorage:
                 """
                 cursor.execute(delete_query, tuple(successful_full_names))
                 deleted_count = cursor.rowcount
-                conn.commit()
                 logger.info(f"Removed {deleted_count} repositories no longer trending.")
             elif successful_full_names and len(successful_full_names) != len(repositories):
                 logger.warning(f"Skipping cleanup: batch write was not 100% successful ({len(successful_full_names)}/{len(repositories)} upserted).")
@@ -265,7 +263,9 @@ class TrendingStorage:
             if len(successful_full_names) == len(repositories):
                 self._update_metadata(cursor, "last_refresh", refresh_ts.isoformat())
                 self._update_metadata(cursor, "repo_count", str(len(successful_full_names)))
-                conn.commit()
+
+            # Single commit at the end for atomic transaction
+            conn.commit()
 
         except Exception as exc:
             logger.error(f"Failed to upsert repositories: {exc}")
@@ -299,7 +299,10 @@ class TrendingStorage:
             row = cursor.fetchone()
 
             if row:
-                return datetime.fromisoformat(row[0])
+                last_refresh = datetime.fromisoformat(row[0])
+                if last_refresh.tzinfo is None:
+                    last_refresh = last_refresh.replace(tzinfo=timezone.utc)
+                return last_refresh
             return None
 
         except Exception as exc:

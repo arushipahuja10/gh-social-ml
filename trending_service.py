@@ -130,8 +130,7 @@ def main():
 
     if args.validate_config:
         logger.info("Configuration validation passed.")
-        if not args.scheduled and not args.once:
-            sys.exit(0)
+        sys.exit(0)
 
     # Check if mode is specified
     if not args.scheduled and not args.once:

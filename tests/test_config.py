@@ -10,8 +10,6 @@ from trending.config import (
     TRENDING_METADATA_TABLE_NAME,
     GITHUB_TIMEOUT_SECONDS,
     GITHUB_MAX_RETRIES,
-    FETCH_README,
-    FETCH_TOPICS,
     README_MAX_LENGTH,
     DATABASE_URL,
     DB_POOL_SIZE,
@@ -48,8 +46,6 @@ class TestConfigDefaults:
 
     def test_default_data_enrichment_config(self):
         """Test default data enrichment configuration."""
-        assert FETCH_README is True
-        assert FETCH_TOPICS is True
         assert README_MAX_LENGTH == 10000
 
     def test_default_database_config(self):
@@ -101,15 +97,11 @@ class TestConfigEnvironmentVariables:
 
     def test_boolean_config_from_env(self, monkeypatch):
         """Test boolean configuration from environment variables."""
-        monkeypatch.setenv("FETCH_README", "false")
-        monkeypatch.setenv("FETCH_TOPICS", "false")
         monkeypatch.setenv("CONTINUE_ON_ERROR", "false")
         import importlib
         import trending.config
         importlib.reload(trending.config)
         trending.config.validate_config()
-        assert trending.config.FETCH_README is False
-        assert trending.config.FETCH_TOPICS is False
         assert trending.config.CONTINUE_ON_ERROR is False
 
 

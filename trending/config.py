@@ -36,12 +36,6 @@ GITHUB_MAX_RETRIES: int = 4  # Default, will be validated and cast in validate_c
 
 # ── Data Enrichment Configuration ───────────────────────────────────────────────────
 
-# Whether to fetch README content for trending repositories
-FETCH_README: bool = os.getenv("FETCH_README", "true").lower() == "true"
-
-# Whether to fetch repository topics/tags
-FETCH_TOPICS: bool = os.getenv("FETCH_TOPICS", "true").lower() == "true"
-
 # Maximum README length to store (in characters)
 README_MAX_LENGTH_STR: str = os.getenv("README_MAX_LENGTH", "10000")
 README_MAX_LENGTH: int = 10000  # Default, will be validated and cast in validate_config()

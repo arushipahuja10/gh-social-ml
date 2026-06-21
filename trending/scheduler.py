@@ -176,7 +176,9 @@ class TrendingScheduler:
         self.running = True
 
         # Schedule the refresh job
-        self.scheduler.every(config.TRENDING_REFRESH_HOURS).hours.do(self.refresh_trending_repositories)
+        # Read config dynamically to ensure CLI overrides are respected
+        refresh_hours = config.TRENDING_REFRESH_HOURS
+        self.scheduler.every(refresh_hours).hours.do(self.refresh_trending_repositories)
 
         # Run once immediately on startup
         logger.info("Running initial refresh on startup...")

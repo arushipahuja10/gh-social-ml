@@ -107,7 +107,7 @@ class TrendingFetcher:
             
             try:
                 # Extract repo name/owner - look for the first link that looks like a repo
-                name_match = re.search(r'href="/([^/]+)/([^/]+?)"', repo_html)
+                name_match = re.search(r'href="/([^/]+)/([^/"]+)"', repo_html)
                 if name_match:
                     owner = name_match.group(1)
                     name = name_match.group(2)
@@ -134,7 +134,7 @@ class TrendingFetcher:
                 star_count = int(stars_match.group(1).replace(',', '')) if stars_match else 0
                 
                 # Extract daily stars (stars today) if available
-                daily_stars_match = re.search(r'([\d,]+)\s+stars\s+today', repo_html, re.IGNORECASE)
+                daily_stars_match = re.search(r'([\d,]+)\s+stars?\s+today', repo_html, re.IGNORECASE)
                 daily_stars = int(daily_stars_match.group(1).replace(',', '')) if daily_stars_match else 0
                 
                 # Extract fork count - try forks link first, fallback to aria-label

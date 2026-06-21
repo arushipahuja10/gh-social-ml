@@ -34,7 +34,9 @@ def setup_logger(
     logger = logging.getLogger(name)
 
     # Clear existing handlers to allow new configuration to be applied
-    logger.handlers.clear()
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
 
     # Set log level
     log_level = level or LOG_LEVEL
