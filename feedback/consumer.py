@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import socket
 from typing import Dict, Any
 
 from .producer import get_in_memory_queue
@@ -83,7 +84,8 @@ class FeedbackConsumer:
         logger.info("Feedback Consumer running in Redis Streams mode.")
         stream_name = "feedback_stream"
         group_name = "feedback_group"
-        consumer_name = "worker_1"
+        # Dynamic consumer name to allow safe horizontal scaling
+        consumer_name = f"worker_{socket.gethostname()}_{os.getpid()}"
 
         # Setup consumer group
         try:
@@ -128,6 +130,17 @@ class FeedbackConsumer:
                                 self.redis_client.xack(stream_name, group_name, message_id)
                             except Exception as exc:
                                 logger.error("Exception handling Redis Stream feedback: %s", exc)
+                        else:
+                            logger.error(
+                                "Skipping malformed message (missing user_id, repo_id, or action): ID %s, payload %s",
+                                message_id,
+                                payload,
+                            )
+                            try:
+                                # Acknowledge to remove it from PEL and prevent infinite redelivery
+                                self.redis_client.xack(stream_name, group_name, message_id)
+                            except Exception as exc:
+                                logger.error("Failed to acknowledge malformed message: %s", exc)
 
             except asyncio.CancelledError:
                 break

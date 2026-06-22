@@ -91,6 +91,9 @@ async def submit_feedback(request: FeedbackRequest):
             },
         }
 
+    except HTTPException:
+        # Re-raise HTTPExceptions explicitly to prevent wrapping them in 500
+        raise
     except Exception as exc:
         logger.error("Failed to process feedback submission: %s", exc)
         raise HTTPException(

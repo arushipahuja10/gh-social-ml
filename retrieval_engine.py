@@ -183,18 +183,21 @@ class RetrievalEngine:
                 }
                 
                 sorted_matches = []
+                sorted_repo_ids = set()
                 for repo_id in ranked_repo_ids:
                     if repo_id in matches_by_id:
                         score_info = next(r for r in ranked_results if r['repo_id'] == repo_id)
-                        match_item = matches_by_id[repo_id]
-                        # Update the score to the MMoE ranker final score
-                        match_item["score"] = score_info["final_score"]
-                        sorted_matches.append(match_item)
+                        # Avoid mutating the original matches in-place
+                        match_copy = dict(matches_by_id[repo_id])
+                        match_copy["score"] = score_info["final_score"]
+                        sorted_matches.append(match_copy)
+                        sorted_repo_ids.add(repo_id)
                 
                 # Catch any missing points to prevent dropping records
                 for mid, m in matches_by_id.items():
-                    if m not in sorted_matches:
-                        sorted_matches.append(m)
+                    repo_id = m.get("repo_id") or (m.get("payload") or {}).get("repo_id")
+                    if repo_id not in sorted_repo_ids:
+                        sorted_matches.append(dict(m))
                         
                 all_matches = sorted_matches
                 logger.info("Successfully ranked %d candidates using Heavy Ranker.", len(all_matches))
