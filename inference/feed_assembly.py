@@ -13,10 +13,14 @@ class FeedAssemblySystem:
         Executes Freshness Injection and Exploration Injection sequentially
         on the pre-ranked top-15 JSON payload from the ranking system.
         """
+        if target_size <= 0:
+            return []
+
         current_time = datetime.now(timezone.utc)
+        ranked_candidates = [dict(item) for item in candidates]
         
         # --- PART 1: FRESHNESS INJECTION ---
-        for item in candidates:
+        for item in ranked_candidates:
             # Check explicitly for None so valid 0.0 scores are preserved
             base_score = item.get('final_score')
             if base_score is None:
@@ -54,19 +58,28 @@ class FeedAssemblySystem:
                 continue
 
         # Re-sort the 15 repos after applying freshness boosts
-        candidates.sort(key=lambda x: x.get('score') if x.get('score') is not None else 0.5, reverse=True)
+        ranked_candidates.sort(key=lambda x: x.get('score') if x.get('score') is not None else 0.5, reverse=True)
+
+        target_count = min(target_size, len(ranked_candidates))
+        final_pool = ranked_candidates[:target_count]
 
         # --- PART 2: EXPLORATION INJECTION ---
-        # Safeguard anchor tier (Top 10) and introduce discovery variations to the bottom tier (Bottom 5)
-        if len(candidates) >= 5:
-            exploit_tier = candidates[:10]
-            explore_tier = candidates[10:]
+        # Keep the top tier stable and shuffle a dynamic discovery tail.
+        if target_count >= 3:
+            explore_count = max(1, target_count // 3)
+            split_index = target_count - explore_count
+            exploit_tier = final_pool[:split_index]
+            explore_tier = final_pool[split_index:]
             
             random.shuffle(explore_tier)
             final_pool = exploit_tier + explore_tier
-        else:
-            final_pool = candidates
 
         # Strip internal temporary scores and return clean ordered string IDs
-        return [str(item.get('repo_id') or item.get('id') or item.get('full_name') or '') for item in final_pool[:target_size]]
-    
+        ordered_ids = []
+        for item in final_pool:
+            repo_id = item.get('repo_id')
+            if not repo_id:
+                raise ValueError("Feed candidate missing required repo_id")
+            ordered_ids.append(str(repo_id))
+
+        return ordered_ids
